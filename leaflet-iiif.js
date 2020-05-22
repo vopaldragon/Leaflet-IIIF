@@ -4,14 +4,21 @@
  * by Jack Reed, @mejackreed
  */
 
-L.TileLayer.Iiif = L.TileLayer.extend({
+function falseFn() {
+  return false;
+}
+var emptyImageUrl =
+  "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+
+L.TileLayer.Iiif = L.GridLayer.extend({
   options: {
     continuousWorld: true,
     tileSize: 256,
     updateWhenIdle: true,
     tileFormat: 'jpg',
     fitBounds: true,
-    setMaxBounds: false
+    setMaxBounds: false,
+    rotate: 0,
   },
 
   initialize: function(url, options) {
@@ -36,19 +43,40 @@ L.TileLayer.Iiif = L.TileLayer.extend({
     this._infoUrl = url;
     this._baseUrl = this._templateUrl();
     this._getInfo();
+
+    this.on("tileunload", function (e) {
+      e.tile.firstChild.onload = null;
+    });
   },
-  getTileUrl: function(coords) {
+  createTile: function (coords, done) {
     var _this = this,
       x = coords.x,
-      y = (coords.y),
-      zoom = _this._getZoomForUrl(),
+      y = coords.y,
+      zoom = coords.z,
       scale = Math.pow(2, _this.maxNativeZoom - zoom),
-      tileBaseSize = _this.options.tileSize * scale,
-      minx = (x * tileBaseSize),
-      miny = (y * tileBaseSize),
-      maxx = Math.min(minx + tileBaseSize, _this.x),
-      maxy = Math.min(miny + tileBaseSize, _this.y);
-    
+      tileBaseSize = _this.options.tileSize * scale;
+    if (this.options.rotate == 90) {
+      var minx = y * tileBaseSize;
+      var maxx = Math.min(minx + tileBaseSize, _this.x);
+      var miny = Math.max(0, this.y - (x + 1) * tileBaseSize);
+      var maxy = this.y - x * tileBaseSize;
+    } else if (this.options.rotate == 180) {
+      var minx = Math.max(0, this.x - (x + 1) * tileBaseSize);
+      var maxx = this.x - x * tileBaseSize;
+      var miny = Math.max(0, this.y - (y + 1) * tileBaseSize);
+      var maxy = this.y - y * tileBaseSize;
+    } else if (this.options.rotate == 270) {
+      var minx = Math.max(0, this.x - (y + 1) * tileBaseSize);
+      var maxx = this.x - y * tileBaseSize;
+      var miny = x * tileBaseSize;
+      var maxy = Math.min(miny + tileBaseSize, _this.y);
+    } else {
+      var minx = x * tileBaseSize;
+      var miny = y * tileBaseSize;
+      var maxx = Math.min(minx + tileBaseSize, _this.x);
+      var maxy = Math.min(miny + tileBaseSize, _this.y);
+    }
+
     var xDiff = (maxx - minx);
     var yDiff = (maxy - miny);
 
@@ -59,13 +87,84 @@ L.TileLayer.Iiif = L.TileLayer.extend({
       size = size + Math.ceil(yDiff / scale);
     }
 
-    return L.Util.template(this._baseUrl, L.extend({
-      format: _this.options.tileFormat,
-      quality: _this.quality,
-      region: [minx, miny, xDiff, yDiff].join(','),
-      rotation: 0,
-      size: size
-    }, this.options));
+    var tileUrl = L.Util.template(
+      this._baseUrl,
+      L.extend(
+        {
+          format: _this.options.tileFormat,
+          quality: _this.quality,
+          region: [minx, miny, xDiff, yDiff].join(","),
+          rotation: 0,
+          size: size,
+        },
+        this.options
+      )
+    );
+    
+    var tile = document.createElement("div");
+    var img = document.createElement("img");
+    tile.appendChild(img);
+    img.alt = "";
+    img.setAttribute("role", "presentation");
+    img.style.transformOrigin = "top left";
+    img.style.position = "absolute";
+    img.style.left = 0;
+    img.style.top = 0;
+    if (this.options.rotate === 90)
+      img.style.transform = "scale(1.001) rotate(90deg) translateY(-100%)";
+    else if (this.options.rotate === 180)
+      img.style.transform =
+        "scale(1.001) rotate(180deg) translateY(-100%) translateX(-100%)";
+    else if (this.options.rotate === 270)
+      img.style.transform = "scale(1.001) rotate(270deg) translateX(-100%)";
+    else img.style.transform = "scale(1.001)";
+
+    img.onload = function () {
+      done(null, tile);
+    };
+    img.onerror = function () {
+      tile.innerHTML = "error";
+      done(null, tile);
+    };
+    img.src = tileUrl;
+    return tile;
+  },
+  _isVertical: function () {
+    return this.options.rotate === 90 || this.options.rotate === 270;
+  },
+  _abortLoading: function () {
+    var i, tile;
+    for (i in this._tiles) {
+      if (this._tiles[i].coords.z !== this._tileZoom) {
+        tile = this._tiles[i].el;
+
+        if (tile) {
+          tile.firstChild.onload = falseFn;
+          tile.firstChild.onerror = falseFn;
+
+          if (!tile.firstChild.complete) {
+            tile.firstChild.src = emptyImageUrl;
+            tile.parentNode.removeChild(tile);
+            delete this._tiles[i];
+          }
+        }
+      }
+    }
+  },
+  _removeTile: function (key) {
+    var tile = this._tiles[key];
+    if (!tile) {
+      return;
+    }
+    tile.el.firstChild.src = emptyImageUrl;
+
+    return L.GridLayer.prototype._removeTile.call(this, key);
+  },
+  _tileReady: function (coords, err, tile) {
+    if (!this._map || (tile && tile.firstChild.src === emptyImageUrl)) {
+      return;
+    }
+    return L.GridLayer.prototype._tileReady.call(this, coords, err, tile);
   },
   onAdd: function(map) {
     var _this = this;
@@ -148,8 +247,14 @@ L.TileLayer.Iiif = L.TileLayer.extend({
     var initialZoom = _this._getInitialZoom(_this._map.getSize());
     var offset = _this._imageSizes.length - 1 - _this.options.maxNativeZoom;
     var imageSize = _this._imageSizes[initialZoom + offset];
-    var sw = _this._map.options.crs.pointToLatLng(L.point(0, imageSize.y), initialZoom);
-    var ne = _this._map.options.crs.pointToLatLng(L.point(imageSize.x, 0), initialZoom);
+    var sw = _this._map.options.crs.pointToLatLng(
+      L.point(0, this._isVertical() ? imageSize.x : imageSize.y),
+      initialZoom
+    );
+    var ne = _this._map.options.crs.pointToLatLng(
+      L.point(this._isVertical() ? imageSize.y : imageSize.x, 0),
+      initialZoom
+    );
     var bounds = L.latLngBounds(sw, ne);
 
     _this._map.fitBounds(bounds, true);
@@ -160,8 +265,14 @@ L.TileLayer.Iiif = L.TileLayer.extend({
     // Find best zoom level, center map, and constrain viewer
     var initialZoom = _this._getInitialZoom(_this._map.getSize());
     var imageSize = _this._imageSizes[initialZoom];
-    var sw = _this._map.options.crs.pointToLatLng(L.point(0, imageSize.y), initialZoom);
-    var ne = _this._map.options.crs.pointToLatLng(L.point(imageSize.x, 0), initialZoom);
+    var sw = _this._map.options.crs.pointToLatLng(
+      L.point(0, this._isVertical() ? imageSize.x : imageSize.y),
+      initialZoom
+    );
+    var ne = _this._map.options.crs.pointToLatLng(
+      L.point(this._isVertical() ? imageSize.y : imageSize.x, 0),
+      initialZoom
+    );
     var bounds = L.latLngBounds(sw, ne);
 
     _this._map.setMaxBounds(bounds, true);
@@ -247,7 +358,6 @@ L.TileLayer.Iiif = L.TileLayer.extend({
       .catch(function(err){
           console.error(err);
       });
-      
   },
 
   _setQuality: function() {
@@ -283,10 +393,10 @@ L.TileLayer.Iiif = L.TileLayer.extend({
   },
   _isValidTile: function(coords) {
     var _this = this;
-    var zoom = _this._getZoomForUrl();
+    var zoom = coords.z;
     var sizes = _this._tierSizes[zoom];
-    var x = coords.x;
-    var y = coords.y;
+    var x = this._isVertical() ? coords.y : coords.x;
+    var y = this._isVertical() ? coords.x : coords.y;
     if (zoom < 0 && x >= 0 && y >= 0) {
       return true;
     }
@@ -309,7 +419,10 @@ L.TileLayer.Iiif = L.TileLayer.extend({
     var offset = _this._imageSizes.length - 1 - _this.options.maxNativeZoom;
     for (var i = _this._imageSizes.length - 1; i >= 0; i--) {
       imageSize = _this._imageSizes[i];
-      if (imageSize.x * tolerance < mapSize.x && imageSize.y * tolerance < mapSize.y) {
+      x = _this._isVertical() ? imageSize.y : imageSize.x;
+      y = _this._isVertical() ? imageSize.x : imageSize.y;
+
+      if (x * tolerance < mapSize.x && y * tolerance < mapSize.y) {
         return i - offset;
       }
     }
